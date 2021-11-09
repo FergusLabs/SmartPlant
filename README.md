@@ -1,1 +1,2 @@
-# SmartPlant
+# SmartWatering
+Self Watering HousePlant
