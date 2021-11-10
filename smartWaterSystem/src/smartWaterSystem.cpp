@@ -11,6 +11,7 @@
  * Date: 11/9/21
  */
 
+//includes libraries for most components and for Adafruit.io connection
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX_RK.h>
 #include <Adafruit_MQTT.h>
@@ -21,10 +22,10 @@
 #include "JsonParserGeneratorRK.h"
 #include <Wire.h>
 #include "credentials.h"
-
+//declare objects
 void setup();
 void loop();
-void publishTimeCheck (void);
+void TimeCheck (void);
 void moistureCheck (void);
 void AQcheck (void);
 void dustCheck(void);
@@ -32,41 +33,38 @@ void dustPublish (void);
 void runPump (void);
 float celToFar(float tempC);
 float paToInHg(float pressPA);
+void mqttPing (void);
+void mqttCheckSubs (void);
 void MQTT_connect();
-#line 19 "c:/Users/School/Documents/IoT/SmartPlant/smartWaterSystem/src/smartWaterSystem.ino"
+#line 20 "c:/Users/School/Documents/IoT/SmartPlant/smartWaterSystem/src/smartWaterSystem.ino"
 Adafruit_BME280 bme;
 #define OLED_RESET D4
 Adafruit_SSD1306 display(OLED_RESET);
 AirQualitySensor AQsensor(A0);
 TCPClient TheClient; 
 Adafruit_MQTT_SPARK mqtt(&TheClient,AIO_SERVER,AIO_SERVERPORT,AIO_USERNAME,AIO_KEY);
-
+//Declare Different Adafuit Feeds
 Adafruit_MQTT_Publish bmeFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bmeFeed");
 Adafruit_MQTT_Publish moistureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/moistureFeed");
 Adafruit_MQTT_Publish AQFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/airQualityFeed");
 Adafruit_MQTT_Publish dustFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/dustFeed");
 Adafruit_MQTT_Subscribe wateringFeed = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/wateringFeed");
-
+//Declare variables
 String DateTime, TimeOnly;
-
+const int dustSensorPin = A4;
+const int moistureSensorPin = A5;
 const int relayPin = D11;
 unsigned long last, startTime;
-
-const int moistureSensorPin = A5;
-int moistureRead;
 bool waterRead;
-
-const int dustSensorPin = A4;
-unsigned long sampletime_ms = 30000;
-
+int moistureRead;
 int airQuality;
 float dustConcentration = 0;
-
 struct enviroData {
   float tempF;
   float relHumid;
   float pressInHg;
 };
+//functions that use structs are declared before use.
 enviroData roomData;
 void bmePublish (enviroData roomData);
 void bmeCheck (enviroData *checkData);
@@ -74,58 +72,39 @@ void oledShow (enviroData *checkData);
 
 void setup() {
   Serial.begin(9600);
-  
-  mqtt.subscribe(&wateringFeed);
-
-  pinMode(moistureSensorPin, INPUT);
+  mqtt.subscribe(&wateringFeed); //connect to subscribed feed
+  pinMode(moistureSensorPin, INPUT); 
   pinMode(relayPin, OUTPUT);
   pinMode(dustSensorPin, INPUT);
-
-  Time.zone(-7);
-  Particle.syncTime();
-  
-  bme.begin();
- 
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3c);
+  Time.zone(-7);  //Set timeZone
+  Particle.syncTime();  //Get time
+  bme.begin();   //turn on BME
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3c);  //turn on and clear OLED display
   display.clearDisplay();
   display.display();
-
-  startTime = millis();
+  startTime = millis(); //dust sensor runs on own time loop, needs startTime
 }
 
 void loop() {
+//Connect to Adafruit.io
   MQTT_connect();
+//Get time
   DateTime = Time.timeStr();
   TimeOnly = DateTime.substring(11,16);
-
 //Publish function calls most of the other functions
-  publishTimeCheck();
+  TimeCheck();
 //dustCheck runs on its own timeline
   dustCheck();
-
 // Ping MQTT Broker every 2 minutes to keep connection alive
-  if ((millis()-last)>120000) {
-      Serial.printf("Pinging MQTT \n");
-      if(! mqtt.ping()) {
-        Serial.printf("Disconnecting \n");
-        mqtt.disconnect();
-      }
-      last = millis();
-  }
-
+  mqttPing();
 //This subloop waits for incoming subscription packets
-  Adafruit_MQTT_Subscribe *subscription;
-  while ((subscription = mqtt.readSubscription(1000))) {
-    if (subscription == &wateringFeed) {
-      waterRead = atof((char *)wateringFeed.lastread);
-        if (waterRead) {
-          runPump();
-        }
-    }
-  }
+  mqttCheckSubs();
 }
 
-void publishTimeCheck (void) {
+/*Functions are defined below*/
+
+//Call functions at set interval
+void TimeCheck (void) {
   static int lastUpdate;
   if((millis()-lastUpdate)>60000){
     AQcheck();
@@ -160,12 +139,13 @@ void bmeCheck (enviroData *checkData) {
   checkData->pressInHg = paToInHg(pressPA);
 }
 
+//moistureCheck also calls runPump function
 void moistureCheck (void) {
   moistureRead = analogRead(moistureSensorPin);
   if(mqtt.Update()) {
     moistureFeed.publish(moistureRead);
   }
-  if ((moistureRead)>3000) {
+  if ((moistureRead)>3300) {
     runPump();
   }
 }
@@ -217,6 +197,7 @@ void runPump (void) {
   Serial.printf("Watered Plant\n");
 }
 
+
 void oledShow (enviroData *checkData) {
   display.clearDisplay();
   display.setTextSize(1);
@@ -226,25 +207,45 @@ void oledShow (enviroData *checkData) {
   display.display();
 }
 
+//Two mapping functions to convert data to more useful units
 float celToFar(float tempC) {
   return  map(tempC,0.0,100.0,32.0,212.0);
 }
-
 float paToInHg(float pressPA) { 
   return (pressPA*0.00029530);   
+}
+// Ping MQTT Broker every 2 minutes to keep connection alive
+void mqttPing (void) {
+   if ((millis()-last)>120000) {
+      Serial.printf("Pinging MQTT \n");
+      if(! mqtt.ping()) {
+        Serial.printf("Disconnecting \n");
+        mqtt.disconnect();
+      }
+      last = millis();
+   }
+}
+//This subloop waits for incoming subscription packets
+void mqttCheckSubs (void) {
+  Adafruit_MQTT_Subscribe *subscription;
+    while ((subscription = mqtt.readSubscription(1000))) {
+      if (subscription == &wateringFeed) {
+       waterRead = atof((char *)wateringFeed.lastread);
+        if (waterRead) {
+          runPump();
+        }
+    }
+  }
 }
 
 // Function to connect and reconnect as necessary to the MQTT server.
 void MQTT_connect() {
   int8_t ret;
- 
   // Stop if already connected.
   if (mqtt.connected()) {
     return;
   }
- 
   Serial.print("Connecting to MQTT... ");
- 
   while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
        Serial.printf("%s\n",(char *)mqtt.connectErrorString(ret));
        Serial.printf("Retrying MQTT connection in 5 seconds..\n");
