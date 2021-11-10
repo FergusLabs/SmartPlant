@@ -11,7 +11,6 @@
  * Date: 11/9/21
  */
 
-
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX_RK.h>
 #include <Adafruit_MQTT.h>
@@ -27,27 +26,42 @@ void setup();
 void loop();
 void publishTimeCheck (void);
 void moistureCheck (void);
+void AQcheck (void);
+void dustCheck(void);
+void dustPublish (void);
 void runPump (void);
 float celToFar(float tempC);
 float paToInHg(float pressPA);
 void MQTT_connect();
-#line 20 "c:/Users/School/Documents/IoT/SmartPlant/smartWaterSystem/src/smartWaterSystem.ino"
+#line 19 "c:/Users/School/Documents/IoT/SmartPlant/smartWaterSystem/src/smartWaterSystem.ino"
 Adafruit_BME280 bme;
 #define OLED_RESET D4
 Adafruit_SSD1306 display(OLED_RESET);
+AirQualitySensor AQsensor(A0);
 TCPClient TheClient; 
 Adafruit_MQTT_SPARK mqtt(&TheClient,AIO_SERVER,AIO_SERVERPORT,AIO_USERNAME,AIO_KEY);
 
 Adafruit_MQTT_Publish bmeFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/bmeFeed");
 Adafruit_MQTT_Publish moistureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/moistureFeed");
+Adafruit_MQTT_Publish AQFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/airQualityFeed");
+Adafruit_MQTT_Publish dustFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/dustFeed");
 Adafruit_MQTT_Subscribe wateringFeed = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/wateringFeed");
 
-const int sensorPin = A0;
-const int relayPin = D11;
 String DateTime, TimeOnly;
+
+const int relayPin = D11;
+unsigned long last, startTime;
+
+const int moistureSensorPin = A5;
 int moistureRead;
 bool waterRead;
-long last;
+
+const int dustSensorPin = A4;
+unsigned long sampletime_ms = 30000;
+
+int airQuality;
+float dustConcentration = 0;
+
 struct enviroData {
   float tempF;
   float relHumid;
@@ -60,19 +74,24 @@ void oledShow (enviroData *checkData);
 
 void setup() {
   Serial.begin(9600);
-  pinMode(sensorPin, INPUT);
+  
+  mqtt.subscribe(&wateringFeed);
+
+  pinMode(moistureSensorPin, INPUT);
   pinMode(relayPin, OUTPUT);
+  pinMode(dustSensorPin, INPUT);
+
   Time.zone(-7);
   Particle.syncTime();
+  
   bme.begin();
-
-  mqtt.subscribe(&wateringFeed);
  
   display.begin(SSD1306_SWITCHCAPVCC, 0x3c);
   display.clearDisplay();
   display.display();
-}
 
+  startTime = millis();
+}
 
 void loop() {
   MQTT_connect();
@@ -81,6 +100,8 @@ void loop() {
 
 //Publish function calls most of the other functions
   publishTimeCheck();
+//dustCheck runs on its own timeline
+  dustCheck();
 
 // Ping MQTT Broker every 2 minutes to keep connection alive
   if ((millis()-last)>120000) {
@@ -98,7 +119,6 @@ void loop() {
     if (subscription == &wateringFeed) {
       waterRead = atof((char *)wateringFeed.lastread);
         if (waterRead) {
-          Serial.printf("Watered Plant\n");
           runPump();
         }
     }
@@ -107,12 +127,13 @@ void loop() {
 
 void publishTimeCheck (void) {
   static int lastUpdate;
-  if((millis()-lastUpdate)>30000){
+  if((millis()-lastUpdate)>60000){
+    AQcheck();
     moistureCheck();
+    dustPublish();
     bmePublish(roomData);
     lastUpdate = millis();
-  
-  }
+    }
 }
 
 void bmePublish (enviroData roomData) {
@@ -140,9 +161,52 @@ void bmeCheck (enviroData *checkData) {
 }
 
 void moistureCheck (void) {
-  moistureRead = analogRead(sensorPin);
+  moistureRead = analogRead(moistureSensorPin);
   if(mqtt.Update()) {
-      moistureFeed.publish(moistureRead);
+    moistureFeed.publish(moistureRead);
+  }
+  if ((moistureRead)>3000) {
+    runPump();
+  }
+}
+
+void AQcheck (void) {
+  airQuality = AQsensor.slope();
+    if(mqtt.Update()) {
+      AQFeed.publish(AQsensor.getValue());
+      if (airQuality == AirQualitySensor::FORCE_SIGNAL) {
+        AQFeed.publish("High pollution! Force signal active.");
+      } else if (airQuality == AirQualitySensor::HIGH_POLLUTION) {
+        AQFeed.publish("High pollution!");
+      } else if (airQuality == AirQualitySensor::LOW_POLLUTION) {
+        AQFeed.publish("Low pollution!");
+      } else if (airQuality == AirQualitySensor::FRESH_AIR) {
+        AQFeed.publish("Fresh air.");
+        } 
+    }
+}
+
+void dustCheck(void) {
+  unsigned long duration, lastCheck;
+  unsigned long lowpulseoccupancy = 0;
+  unsigned long sampletime_ms = 30000;
+  float ratio = 0;
+  if ((millis()-lastCheck)>30001) {
+    duration = pulseIn(dustSensorPin, LOW);
+    lowpulseoccupancy = lowpulseoccupancy+duration;
+      if ((millis()-startTime) > sampletime_ms) {
+        ratio = lowpulseoccupancy/(sampletime_ms*10.0);  // Integer percentage 0=>100
+        dustConcentration = 1.1*pow(ratio,3)-3.8*pow(ratio,2)+520*ratio+0.62; // using spec sheet curve
+        lowpulseoccupancy = 0;
+        startTime = millis();
+      }
+    lastCheck = millis();
+  }
+}
+
+void dustPublish (void) {
+  if(mqtt.Update()) {
+    dustFeed.publish(dustConcentration);
   }
 }
 
@@ -150,6 +214,7 @@ void runPump (void) {
   digitalWrite(relayPin, HIGH);
   delay(1000);
   digitalWrite(relayPin, LOW);
+  Serial.printf("Watered Plant\n");
 }
 
 void oledShow (enviroData *checkData) {
@@ -157,7 +222,7 @@ void oledShow (enviroData *checkData) {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(0,0);
-  display.printf("Moisture Read = %i,\nRoom TempF=%f\nRoom Humidity=%f\n@time = %s",moistureRead,checkData->tempF,checkData->relHumid,TimeOnly.c_str());
+  display.printf("Moisture Read = %i,\nRoom TempF = %2.2f\nHumidity = %2.2f\nAir Quality =%i\n,Dust Concentration =%4.3f\n@time = %s",moistureRead,checkData->tempF,checkData->relHumid,airQuality,dustConcentration,TimeOnly.c_str());
   display.display();
 }
 
@@ -166,7 +231,7 @@ float celToFar(float tempC) {
 }
 
 float paToInHg(float pressPA) { 
-   return (pressPA*0.00029530);   
+  return (pressPA*0.00029530);   
 }
 
 // Function to connect and reconnect as necessary to the MQTT server.
