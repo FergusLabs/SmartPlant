@@ -34,7 +34,8 @@ void runPump (void);
 float celToFar(float tempC);
 float paToInHg(float pressPA);
 void mqttPing (void);
-void mqttCheckSubs (void);
+void mqttCheckWaterButton (void);
+void mqttCheckEmail (void);
 void MQTT_connect();
 #line 20 "c:/Users/School/Documents/IoT/SmartPlant/smartWaterSystem/src/smartWaterSystem.ino"
 Adafruit_BME280 bme;
@@ -49,6 +50,7 @@ Adafruit_MQTT_Publish moistureFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "
 Adafruit_MQTT_Publish AQFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/airQualityFeed");
 Adafruit_MQTT_Publish dustFeed = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/dustFeed");
 Adafruit_MQTT_Subscribe wateringFeed = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/wateringFeed");
+Adafruit_MQTT_Subscribe email = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/email");
 //Declare variables
 String DateTime, TimeOnly;
 const int dustSensorPin = A4;
@@ -98,7 +100,7 @@ void loop() {
 // Ping MQTT Broker every 2 minutes to keep connection alive
   mqttPing();
 //This subloop waits for incoming subscription packets
-  mqttCheckSubs();
+  mqttCheckWaterButton();
 }
 
 /*Functions are defined below*/
@@ -145,22 +147,24 @@ void moistureCheck (void) {
   if(mqtt.Update()) {
     moistureFeed.publish(moistureRead);
   }
-  if ((moistureRead)>3300) {
+  if ((moistureRead)>3200) {
     runPump();
   }
 }
 
 void AQcheck (void) {
-  airQuality = AQsensor.slope();
+  int AQ;
+  AQ = AQsensor.slope();
+  airQuality = AQsensor.getValue();
     if(mqtt.Update()) {
-      AQFeed.publish(AQsensor.getValue());
-      if (airQuality == AirQualitySensor::FORCE_SIGNAL) {
+      AQFeed.publish(airQuality);
+      if (AQ == AirQualitySensor::FORCE_SIGNAL) {
         AQFeed.publish("High pollution! Force signal active.");
-      } else if (airQuality == AirQualitySensor::HIGH_POLLUTION) {
+      } else if (AQ == AirQualitySensor::HIGH_POLLUTION) {
         AQFeed.publish("High pollution!");
-      } else if (airQuality == AirQualitySensor::LOW_POLLUTION) {
+      } else if (AQ == AirQualitySensor::LOW_POLLUTION) {
         AQFeed.publish("Low pollution!");
-      } else if (airQuality == AirQualitySensor::FRESH_AIR) {
+      } else if (AQ == AirQualitySensor::FRESH_AIR) {
         AQFeed.publish("Fresh air.");
         } 
     }
@@ -171,17 +175,14 @@ void dustCheck(void) {
   unsigned long lowpulseoccupancy = 0;
   unsigned long sampletime_ms = 30000;
   float ratio = 0;
-  if ((millis()-lastCheck)>30001) {
     duration = pulseIn(dustSensorPin, LOW);
     lowpulseoccupancy = lowpulseoccupancy+duration;
       if ((millis()-startTime) > sampletime_ms) {
-        ratio = lowpulseoccupancy/(sampletime_ms*10.0);  // Integer percentage 0=>100
-        dustConcentration = 1.1*pow(ratio,3)-3.8*pow(ratio,2)+520*ratio+0.62; // using spec sheet curve
+        ratio = lowpulseoccupancy/(sampletime_ms*10.0);  
+        dustConcentration = 1.1*pow(ratio,3)-3.8*pow(ratio,2)+520*ratio+0.62; 
         lowpulseoccupancy = 0;
         startTime = millis();
       }
-    lastCheck = millis();
-  }
 }
 
 void dustPublish (void) {
@@ -203,10 +204,10 @@ void oledShow (enviroData *checkData) {
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(0,0);
-  display.printf("Moisture Read = %i,\nRoom TempF = %2.2f\nHumidity = %2.2f\nAir Quality =%i\n,Dust Concentration =%4.3f\n@time = %s",moistureRead,checkData->tempF,checkData->relHumid,airQuality,dustConcentration,TimeOnly.c_str());
+  display.printf("Moisture    = %i\nRoom TempF  = %2.2f\nHumidity    = %2.2f\nAir Quality = %i\nDust Level  = %4.2f\n@time       = %s",moistureRead,checkData->tempF,checkData->relHumid,airQuality,dustConcentration,TimeOnly.c_str());
   display.display();
 }
-
+ 
 //Two mapping functions to convert data to more useful units
 float celToFar(float tempC) {
   return  map(tempC,0.0,100.0,32.0,212.0);
@@ -225,8 +226,8 @@ void mqttPing (void) {
       last = millis();
    }
 }
-//This subloop waits for incoming subscription packets
-void mqttCheckSubs (void) {
+
+void mqttCheckWaterButton (void) {
   Adafruit_MQTT_Subscribe *subscription;
     while ((subscription = mqtt.readSubscription(1000))) {
       if (subscription == &wateringFeed) {
@@ -234,6 +235,19 @@ void mqttCheckSubs (void) {
         if (waterRead) {
           runPump();
         }
+    }
+  }
+}
+
+void mqttCheckEmail (void) {
+  Adafruit_MQTT_Subscribe *subscription;
+    while ((subscription = mqtt.readSubscription(1000))) {
+      if (subscription == &email) {
+       Serial.printf("You've got Mail!\n");
+       digitalWrite(D7,HIGH);
+       delay(1000);
+       digitalWrite(D7,LOW);
+        
     }
   }
 }
